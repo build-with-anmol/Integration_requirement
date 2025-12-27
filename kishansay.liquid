@@ -1,0 +1,275 @@
+// Kisaansay requirement -- where work our button at the minimum value of 1500 rs 
+
+
+// Add this script at the sr-checkout file 
+
+<script>
+(function () {
+  const THRESHOLD = 1500;
+
+  function parsePriceText(priceText) {
+    if (!priceText) return NaN;
+    const cleaned = priceText.replace(/[^\d.,]/g, '').replace(/,/g, '').trim();
+    const n = parseFloat(cleaned);
+    return isNaN(n) ? NaN : n;
+  }
+
+  function readPriceFromContainer(container) {
+    if (!container) return NaN;
+    const selectors = [
+      '.price-item--sale',
+      '.price-item--last',
+      '.price-item',
+      '.price__sale .price-item--sale'
+    ];
+
+    for (const sel of selectors) {
+      const el = container.querySelector(sel);
+      if (el && el.textContent.trim()) {
+        const val = parsePriceText(el.textContent);
+        if (!isNaN(val)) return val;
+      }
+    }
+
+    const text = container.textContent || "";
+    const match = text.replace(/\s+/g, " ").match(/[\d.,]{2,}/);
+    if (match) return parsePriceText(match[0]);
+
+    return NaN;
+  }
+
+  function findShiprocketForPriceEl(priceEl) {
+    let node = priceEl;
+    while (node && node !== document.body) {
+      const candidate = node.querySelector && node.querySelector('.shiprocket-headless[data-type="product"]');
+      if (candidate) return candidate;
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function evaluateAll() {
+    const priceContainers = Array.from(document.querySelectorAll('.price__container'));
+    const handled = new Set();
+
+    priceContainers.forEach(pc => {
+      const shipEl = findShiprocketForPriceEl(pc);
+      if (!shipEl) return;
+      if (handled.has(shipEl)) return;
+      handled.add(shipEl);
+
+      const price = readPriceFromContainer(pc);
+
+      if (isNaN(price)) {
+        shipEl.style.display = "";
+        shipEl.removeAttribute("aria-hidden");
+      } else {
+        if (price < THRESHOLD) {
+          shipEl.style.display = "none";
+          shipEl.setAttribute("aria-hidden", "true");
+        } else {
+          shipEl.style.display = "";
+          shipEl.removeAttribute("aria-hidden");
+        }
+      }
+    });
+
+    const allShip = Array.from(document.querySelectorAll('.shiprocket-headless[data-type="product"]'));
+    allShip.forEach(s => {
+      if (!handled.has(s)) {
+        s.style.display = "";
+        s.removeAttribute("aria-hidden");
+      }
+    });
+  }
+
+  function debounce(fn, wait = 100) {
+    let t;
+    return function () {
+      clearTimeout(t);
+      t = setTimeout(() => fn.apply(this, arguments), wait);
+    };
+  }
+
+  const debouncedEvaluateAll = debounce(evaluateAll, 50);
+
+  /* ----------------------------------------------------
+     🔥 MAIN FIX (works for BOTH: low→high & high→low)
+     ---------------------------------------------------- */
+  function forceAutoRefresh() {
+    document.addEventListener("change", (e) => {
+      if (
+        e.target.matches("[name='id']") ||
+        e.target.matches("select[name='options[]']") ||
+        e.target.matches("input[type='radio']")
+      ) {
+        // WAIT for shopify to update DOM
+        setTimeout(() => {
+          evaluateAll();  // instant check
+          setTimeout(evaluateAll, 50);   // DOM replaced → recheck
+          setTimeout(evaluateAll, 120);  // final stable DOM → recheck
+        }, 20);
+      }
+    });
+  }
+  /* -------------------------------------------------- */
+
+  const observer = new MutationObserver(debouncedEvaluateAll);
+  function startObserver() {
+    observer.observe(document.documentElement || document.body, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["class", "style", "data-price", "data-variant-id"]
+    });
+  }
+
+  function attachEventListeners() {
+    document.addEventListener("change", function (e) {
+      const t = e.target;
+      if (!t) return;
+      if (
+        t.matches("select") ||
+        t.matches("input[type='radio']") ||
+        t.matches("input[name='quantity']")
+      ) {
+        debouncedEvaluateAll();
+      }
+    }, true);
+
+    ["variant:change", "variant:changed", "variantChange", "product:variant:changed", "product:updated"]
+      .forEach(ev => {
+        document.addEventListener(ev, () => {
+          setTimeout(evaluateAll, 50); // Shopify DOM replacement fix
+        }, true);
+      });
+  }
+
+  function init() {
+    evaluateAll();
+    forceAutoRefresh(); // 🔥 FIX ADDED HERE
+    attachEventListeners();
+    startObserver();
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})(); 
+
+// FINAL FIX: force auto-refresh for LOW → HIGH issue
+function finalVariantFix() {
+  const variantInputs = document.querySelectorAll(
+    "select[name='id'], select[name='options[]'], input[type='radio']"
+  );
+
+  variantInputs.forEach(input => {
+    input.addEventListener("change", () => {
+      // Price DOM replaces -> evaluate after each stage
+      setTimeout(evaluateAll, 10);   // stage 1
+      setTimeout(evaluateAll, 80);   // stage 2
+      setTimeout(evaluateAll, 160);  // stage 3 (final stable)
+    });
+  });
+
+  // Shopify internal events
+  ["variant:changed", "variant:change", "product:variant:changed"].forEach(ev => {
+    document.addEventListener(ev, () => {
+      setTimeout(evaluateAll, 10);
+      setTimeout(evaluateAll, 80);
+      setTimeout(evaluateAll, 160);
+    });
+  });
+}
+
+finalVariantFix();   // run fix
+
+</script>
+
+
+// ------------------------------------------------------------------------------------------------
+
+// This is the product page button code
+
+ {% assign p = product.selected_or_first_available_variant.price %}
+{% if p >= 150000 %}
+
+  {%- unless product.selected_or_first_available_variant.available -%}
+    <style>
+      .sr-headless-checkout {
+        opacity: 0.5;
+        cursor: not-allowed;
+        pointer-events: none;
+      }
+    </style>
+  {%- endunless -%}
+
+  <input type="hidden" value="true" id="fastrrCollectionPage">
+  <input type="hidden" value="{{ product.url }}" name="productUrl">
+  <div class="shiprocket-headless" data-type="product"></div>
+ 
+{/*  ------------------------------------------------------------------------------------------------ */}
+
+
+
+{/* Using this part of code automatically refreshes the page when the variant is changed */} 
+
+
+  <script>
+document.addEventListener("DOMContentLoaded", function() {
+
+  function autoRefreshVariant() {
+    // Refresh evaluateAll at multiple stages because Shopify replaces DOM in phases
+    setTimeout(() => evaluateAllSafe(), 10);
+    setTimeout(() => evaluateAllSafe(), 80);
+    setTimeout(() => evaluateAllSafe(), 160);
+  }
+
+  function evaluateAllSafe() {
+    try {
+      if (typeof evaluateAll === "function") {
+        evaluateAll();
+      }
+    } catch (e) {
+      console.warn("evaluateAll missing", e);
+    }
+  }
+
+  // Capture all variant buttons (your radio inputs)
+  const radios = document.querySelectorAll(
+    "variant-selects input[type='radio']"
+  );
+
+  radios.forEach(radio => {
+    radio.addEventListener("change", () => {
+      autoRefreshVariant();
+    });
+  });
+
+  // Shopify internal variant events
+  [
+    "variant:changed",
+    "variant:change",
+    "product:variant:changed"
+  ].forEach(evt => {
+    document.addEventListener(evt, autoRefreshVariant);
+  });
+
+  // Mutation observer to catch price changes
+  const priceObserver = new MutationObserver(() => {
+    autoRefreshVariant();
+  });
+
+  const priceBox = document.querySelector(".price, .product__price, .price__container");
+  if (priceBox) {
+    priceObserver.observe(priceBox, {
+      childList: true,
+      subtree: true,
+      characterData: true
+    });
+  }
+
+});
+</script>
